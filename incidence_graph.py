@@ -338,19 +338,6 @@ class IncidenceGraph:
     
         for layer_data in self._layers.values():
             layer_data["nodes"].discard(node_id)
-
-    def remove_layer(self, layer_id):
-        """Remove a layer from the graph."""
-        if layer_id == self._default_layer:
-            raise ValueError("Cannot remove default layer")
-        if layer_id not in self._layers:
-            raise KeyError(f"Layer {layer_id} not found")
-        
-        del self._layers[layer_id]
-        
-        # Reset current layer if it was deleted
-        if self._current_layer == layer_id:
-            self._current_layer = self._default_layer
       
     def set_active_layer(self, layer_id):
         """Set the active layer for operations."""
