@@ -101,95 +101,119 @@ class IncidenceGraph:
             self.set_node_attrs(node_id, **attributes)
 
     
-    def add_edge(self, source, target, layer=None, weight=1.0, edge_id=None, edge_type='regular', 
-             propagate='none', layer_weight=None, edge_directed=None, **attributes):
-        """
-        Add edge with propagation control.
-        
-        propagate options:
-        - 'none': Only add to specified layer
-        - 'shared': Add to layers where both nodes exist  
-        - 'all': Add to all layers containing either node
-        """
-        layer = layer or self._current_layer
-        
-        # Ensure nodes exist globally
-        if source not in self.entity_to_idx:
-            if edge_type == 'node_edge' and isinstance(source, str) and source.startswith('edge_'):
-                self.add_edge_entity(source, layer=layer)
-            else:
-                self.add_node(source, layer=layer)
-
-        if target not in self.entity_to_idx:
-            if edge_type == 'node_edge' and isinstance(target, str) and target.startswith('edge_'):
-                self.add_edge_entity(target, layer=layer)
-            else:
-                self.add_node(target, layer=layer)
-        
-        # Generate edge ID if not provided
-        if edge_id is None:
-            edge_id = self._get_next_edge_id()
-        
-        # decide directedness for this edge
-        is_dir = self.directed if edge_directed is None else bool(edge_directed)
-        self.edge_directed[edge_id] = is_dir
-
-        # Add/update in global matrix
-        if edge_id in self.edge_to_idx:
-            # Update existing edge
-            col_idx = self.edge_to_idx[edge_id]
-            self.edge_weights[edge_id] = weight
+    def add_edge(
+        self,
+        source,
+        target,
+        layer=None,
+        weight=1.0,
+        edge_id=None,
+        edge_type="regular",
+        propagate="none",
+        layer_weight=None,
+        edge_directed=None,
+        **attributes,
+    ):
+            # validate inputs
+            if propagate not in {"none", "shared", "all"}:
+                raise ValueError(f"propagate must be one of 'none'|'shared'|'all', got {propagate!r}")
+            if not isinstance(weight, (int, float)):
+                raise TypeError(f"weight must be numeric, got {type(weight).__name__}")
+            if edge_type not in {"regular", "node_edge"}:
+                raise ValueError(f"edge_type must be 'regular' or 'node_edge', got {edge_type!r}")
+    
+            # resolve layer + whether to touch layering at all
+            layer = self._current_layer if layer is None else layer
+            touch_layer = layer is not None
+    
+            # ensure nodes exist (global)
+            def _ensure_node_or_edge_entity(x):
+                if x in self.entity_to_idx:
+                    return
+                if edge_type == "node_edge" and isinstance(x, str) and x.startswith("edge_"):
+                    self.add_edge_entity(x, layer=layer)
+                else:
+                    self.add_node(x, layer=layer)
+    
+            _ensure_node_or_edge_entity(source)
+            _ensure_node_or_edge_entity(target)
+    
+            # indices (after potential node creation)
             source_idx = self.entity_to_idx[source]
             target_idx = self.entity_to_idx[target]
-            self.edge_definitions[edge_id] = (source, target, self.edge_definitions[edge_id][2])
-
-            self._matrix[:, col_idx] = 0
-            self._matrix[source_idx, col_idx] = weight
-            if source != target:
-                self._matrix[target_idx, col_idx] = -weight if self.directed else weight
-            self.edge_definitions[edge_id] = (source, target, self.edge_definitions[edge_id][2])
-        else:
-            # Add new edge to global structures
-            col_idx = self._num_edges
-            self.edge_to_idx[edge_id] = col_idx
-            self.idx_to_edge[col_idx] = edge_id
-            self.edge_definitions[edge_id] = (source, target, edge_type)
-            self.edge_weights[edge_id] = weight
-            self._num_edges += 1
-            
-            self._matrix.resize((self._num_entities, self._num_edges))
-            
-            source_idx = self.entity_to_idx[source]
-            target_idx = self.entity_to_idx[target]
-            self._matrix[source_idx, col_idx] = weight
-            if source != target:
-                self._matrix[target_idx, col_idx] = -weight if self.directed else weight
-        
-        # Add to specified layer (ensure layer exists)
-        if layer not in self._layers:
-            self._layers[layer] = {"nodes": set(), "edges": set(), "attributes": {}}
-        
-        self._layers[layer]["edges"].add(edge_id)
-        self._layers[layer]["nodes"].update([source, target])
-        
-        # per-layer weight (falls back to global if None)
-        if layer_weight is not None:
-            self.layer_edge_weights[layer][edge_id] = float(layer_weight)
-        
-        if layer is not None and layer_weight is not None:
-            self.set_edge_layer_attrs(layer, edge_id, weight=float(layer_weight))
-
-        # Handle propagation
-        if propagate == 'shared':
-            self._propagate_to_shared_layers(edge_id, source, target)
-        elif propagate == 'all':
-            self._propagate_to_all_layers(edge_id, source, target)
-        
-        # Add edge attributes
-        if attributes:
-            self.set_edge_attrs(edge_id, **attributes)
-        
-        return edge_id
+    
+            # edge id
+            if edge_id is None:
+                edge_id = self._get_next_edge_id()
+    
+            # determine direction
+            is_dir = self.directed if edge_directed is None else bool(edge_directed)
+    
+            # create or update bookkeeping
+            if edge_id in self.edge_to_idx:
+                # update
+                col_idx = self.edge_to_idx[edge_id]
+    
+                # allow explicit direction change; otherwise keep existing
+                if edge_directed is None:
+                    is_dir = self.edge_directed.get(edge_id, is_dir)
+                self.edge_directed[edge_id] = is_dir
+    
+                # if source/target changed, update definition
+                old_src, old_tgt, old_type = self.edge_definitions[edge_id]
+                self.edge_definitions[edge_id] = (source, target, old_type)  # keep old_type by design
+    
+                # ensure matrix has enough rows (in case nodes were added since creation)
+                if self._matrix.shape[0] < self._num_entities:
+                    self._matrix.resize((self._num_entities, self._matrix.shape[1]))
+    
+                # rewrite column
+                self._matrix[:, col_idx] = 0
+                self._matrix[source_idx, col_idx] = weight
+                if source != target:
+                    self._matrix[target_idx, col_idx] = -weight if is_dir else weight
+    
+                self.edge_weights[edge_id] = weight
+    
+            else:
+                # create
+                col_idx = self._num_edges
+                self.edge_to_idx[edge_id] = col_idx
+                self.idx_to_edge[col_idx] = edge_id
+                self.edge_definitions[edge_id] = (source, target, edge_type)
+                self.edge_weights[edge_id] = weight
+                self.edge_directed[edge_id] = is_dir
+                self._num_edges += 1
+    
+                # grow matrix to fit
+                self._matrix.resize((self._num_entities, self._num_edges))
+                self._matrix[source_idx, col_idx] = weight
+                if source != target:
+                    self._matrix[target_idx, col_idx] = -weight if is_dir else weight
+    
+            # layer handling
+            if touch_layer:
+                if layer not in self._layers:
+                    self._layers[layer] = {"nodes": set(), "edges": set(), "attributes": {}}
+                self._layers[layer]["edges"].add(edge_id)
+                self._layers[layer]["nodes"].update((source, target))
+    
+                if layer_weight is not None:
+                    w = float(layer_weight)
+                    self.set_edge_layer_attrs(layer, edge_id, weight=w)
+                    self.layer_edge_weights.setdefault(layer, {})[edge_id] = w
+    
+            # propagation
+            if propagate == "shared":
+                self._propagate_to_shared_layers(edge_id, source, target)
+            elif propagate == "all":
+                self._propagate_to_all_layers(edge_id, source, target)
+    
+            # attributes
+            if attributes:
+                self.set_edge_attrs(edge_id, **attributes)
+    
+            return edge_id
 
     def add_edge_entity(self, edge_entity_id, layer=None, **attributes):
         """
@@ -256,7 +280,11 @@ class IncidenceGraph:
         del self.edge_to_idx[edge_id]
         del self.edge_definitions[edge_id]
         del self.edge_weights[edge_id]
-        
+
+        # Update directionality metadata 
+        if edge_id in self.edge_directed:
+            del self.edge_directed[edge_id]
+
         # Reindex remaining edges
         new_edge_to_idx = {}
         new_idx_to_edge = {}
@@ -398,14 +426,16 @@ class IncidenceGraph:
         entity_type = self.entity_types.get(entity_id, 'node')
         
         for edge_id, (source, target, _) in self.edge_definitions.items():
+            is_directed = self.edge_directed.get(edge_id, self.directed)
+            
             if source == entity_id:
                 neighbors.append(target)
             elif target == entity_id:
-                # For undirected graphs or edge entities, include reverse direction
-                if not self.directed or entity_type == 'edge':
+                # Only include source as neighbor if edge is undirected or if this is an edge entity
+                if not is_directed or entity_type == 'edge':
                     neighbors.append(source)
         
-        return list(set(neighbors))  # Remove duplicates
+        return list(set(neighbors))
     
     def degree(self, entity_id):
         """Get degree of a node or edge entity."""
@@ -464,8 +494,9 @@ class IncidenceGraph:
             edge_attrs = {}
             if (not self.edge_attributes.empty) and (edge_id in self.edge_attributes.index):
                 edge_attrs = self.edge_attributes.loc[edge_id].to_dict()
+            edge_dir = self.edge_directed.get(edge_id, self.directed)
             new_graph.add_edge(source, target, weight=weight, edge_id=edge_id, 
-                            edge_type=edge_type, **edge_attrs)
+                            edge_type=edge_type, edge_directed=edge_dir, **edge_attrs)
         
         # Copy layer structure
         for layer_id, layer_data in self._layers.items():
@@ -644,59 +675,58 @@ class IncidenceGraph:
         return result_layer_id
 
     def edge_presence_across_layers(
-    self,
-    edge_id: str | None = None,
-    source: str | None = None,
-    target: str | None = None,
-    *,
-    include_default: bool = False,
-    undirected_match: bool | None = None
-):
+        self,
+        edge_id: str | None = None,
+        source: str | None = None,
+        target: str | None = None,
+        *,
+        include_default: bool = False,
+        undirected_match: bool | None = None
+    ):
         """
         Find where an edge exists across layers.
-
-        Modes:
-        - By edge_id: returns list[layer_id] (backward-compatible).
-        - By (source, target): returns dict[layer_id -> list[edge_id]] (captures parallel edges).
+        
 
         Args:
         edge_id: explicit edge identifier.
         source, target: endpoints to match (used if edge_id is None).
         include_default: include the internal 'default' layer if True (default: False).
-        undirected_match: if True, (u,v) matches (v,u) as well; if None, defaults to (not self.directed).
-
+        undirected_match: if True, (u,v) matches (v,u) only for undirected edges if None, defaults to False (strict matching)
         Raises:
         ValueError: if neither edge_id nor (source,target) are provided, or both are provided.
         """
-        # validate mode
         has_id = edge_id is not None
         has_pair = (source is not None) and (target is not None)
         if has_id == has_pair:
             raise ValueError("Provide either edge_id OR (source and target), but not both.")
-
+        
         layers_view = self.layers(include_default=include_default)
-
-        # Back-compat mode: by edge_id -> list of layers
+        
+        # By edge_id mode
         if has_id:
             layers_with_edge = []
             for lid, ldata in layers_view.items():
                 if edge_id in ldata["edges"]:
                     layers_with_edge.append(lid)
             return layers_with_edge
-
-        # Pair mode: (source, target) -> dict of layers to matching edge_ids
+        
+        # By (source, target) mode
         if undirected_match is None:
-            undirected_match = not self.directed
-
+            undirected_match = False  # Default to strict matching
+        
         out: dict[str, list[str]] = {}
         for lid, ldata in layers_view.items():
             matches = []
             for eid in ldata["edges"]:
                 s, t, _ = self.edge_definitions[eid]
+                
+                edge_is_directed = self.edge_directed.get(eid, self.directed)
+                
                 if s == source and t == target:
                     matches.append(eid)
-                elif undirected_match and s == target and t == source:
+                elif undirected_match and not edge_is_directed and s == target and t == source:
                     matches.append(eid)
+            
             if matches:
                 out[lid] = matches
         return out
@@ -1054,4 +1084,46 @@ class IncidenceGraph:
             "missing_edge_rows": missing_edge_rows,
             "invalid_edge_layer_rows": bad_edge_layer
         }
+    
+    def in_neighbors(self, node_id):
+        """Get nodes that point TO this node (directed edges) or connect via undirected edges."""
+        if node_id not in self.entity_to_idx:
+            return []
+        
+        neighbors = []
+        for edge_id, (source, target, _) in self.edge_definitions.items():
+            is_directed = self.edge_directed.get(edge_id, self.directed)
+            
+            if target == node_id:
+                neighbors.append(source)
+            elif source == node_id and not is_directed:
+                neighbors.append(target)
+        
+        return list(set(neighbors))
+
+    def out_neighbors(self, node_id):
+        """Get nodes that this node points TO (directed edges) or connects via undirected edges."""
+        if node_id not in self.entity_to_idx:
+            return []
+        
+        neighbors = []
+        for edge_id, (source, target, _) in self.edge_definitions.items():
+            is_directed = self.edge_directed.get(edge_id, self.directed)
+            
+            if source == node_id:
+                neighbors.append(target)
+            elif target == node_id and not is_directed:
+                neighbors.append(source)
+        
+        return list(set(neighbors))
+
+    def get_directed_edges(self):
+        """Return all directed edges."""
+        return [eid for eid in self.edge_to_idx.keys() 
+                if self.edge_directed.get(eid, self.directed)]
+
+    def get_undirected_edges(self):
+        """Return all undirected edges."""
+        return [eid for eid in self.edge_to_idx.keys() 
+                if not self.edge_directed.get(eid, self.directed)]
 
